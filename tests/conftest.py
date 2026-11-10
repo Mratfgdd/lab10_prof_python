@@ -1,110 +1,213 @@
-"""Fixtures: окрема тестова БД (створена міграціями), налаштування, HTTPX, uvicorn."""
+"""Спільні fixtures: тестова БД, ASGI-клієнт, uvicorn."""
 
 import shutil
 import socket
+import sqlite3
 import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import closing
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
 import pytest_asyncio
 import uvicorn
+from alembic import command
+from alembic.config import Config
 from fastapi import FastAPI
+from sqlalchemy import Engine
+from sqlalchemy.orm import Session, sessionmaker
+from support import ENV_NAMES, PROJECT_ROOT, Query, Serve, SetEnv
 
-from bank_account_service.api import create_app
-from bank_account_service.config import Settings
-from bank_account_service.database import migrate
-from bank_account_service.external_api import BankApiClient
-
-CONFIG_VARIABLES = (
-    "APP_NAME",
-    "APP_ENV",
-    "DATABASE_URL",
-    "LOG_LEVEL",
-    "CONFLICT_RETRIES",
-    "API_TOKEN",
-)
+from student_manager.api import create_app
+from student_manager.config import get_settings
+from student_manager.database import make_engine, make_session_factory
+from student_manager.external_api import RetryPolicy, StudentApiClient
+from student_manager.models import Base
+from student_manager.services import StudentService
 
 
 @pytest.fixture(autouse=True)
-def _isolated_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Тести не залежать від змінних і .env розробника: чисте середовище, cwd - tmp_path."""
-    for name in CONFIG_VARIABLES:
+def _clean_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Iterator[None]:
+    """Тести не залежать від змінних середовища й локального .env."""
+    for name in ENV_NAMES:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def set_env(monkeypatch: pytest.MonkeyPatch) -> SetEnv:
+    """Задає змінні середовища й скидає кеш налаштувань."""
+
+    def apply(**values: str) -> None:
+        for name, value in values.items():
+            monkeypatch.setenv(name.upper(), value)
+        get_settings.cache_clear()
+
+    return apply
+
+
+@pytest.fixture
+def db_path(tmp_path: Path) -> Path:
+    return tmp_path / "test_students.db"
+
+
+@pytest.fixture
+def engine(db_path: Path) -> Iterator[Engine]:
+    engine = make_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def session_factory(engine: Engine) -> sessionmaker[Session]:
+    return make_session_factory(engine)
+
+
+@pytest.fixture
+def session(session_factory: sessionmaker[Session]) -> Iterator[Session]:
+    with session_factory() as session:
+        yield session
+
+
+@pytest.fixture
+def service(session: Session) -> StudentService:
+    return StudentService(session)
+
+
+@pytest.fixture
+def school(service: StudentService) -> StudentService:
+    service.create_group("PI-21")
+    service.create_group("PI-22")
+    service.create_group("PI-23")
+    service.add_student(
+        "Олена", "Коваленко", "PI-21", 95.0, "olena@example.com"
+    )
+    service.add_student("Андрій", "Мельник", "PI-21", 80.0)
+    service.add_student("Ірина", "Бондар", "PI-22", 99.5)
+    service.add_student("Тарас", "Гриценко", "PI-22", 55.0)
+    return service
+
+
+@pytest.fixture
+def query(db_path: Path) -> Query:
+    def run(sql: str, *parameters: object) -> list[tuple[Any, ...]]:
+        with closing(sqlite3.connect(db_path)) as connection:
+            return connection.execute(sql, parameters).fetchall()
+
+    return run
+
+
+@pytest.fixture
+def group_of(query: Query) -> Callable[[int], str]:
+    def read(student_id: int) -> str:
+        rows = query(
+            (
+                "SELECT g.name FROM students s JOIN groups g ON g.id = "
+                "s.group_id "
+                "WHERE s.id = ?"
+            ),
+            student_id,
+        )
+        return str(rows[0][0])
+
+    return read
+
+
+@pytest.fixture
+def alembic_cfg(db_path: Path) -> Config:
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+    config.attributes["configure_logger"] = False
+    return config
 
 
 @pytest.fixture(scope="session")
 def migrated_template(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Один раз на сесію: порожня БД, створена міграціями (як під час запуску сервісу)."""
-    path = tmp_path_factory.mktemp("template") / "bank.db"
-    migrate(f"sqlite:///{path}")
+    path = tmp_path_factory.mktemp("template") / "template.db"
+    config = Config(str(PROJECT_ROOT / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{path}")
+    config.attributes["configure_logger"] = False
+    command.upgrade(config, "head")
     return path
 
 
 @pytest.fixture
-def db_url(migrated_template: Path, tmp_path: Path) -> str:
-    """Кожен тест - на власній копії тестової БД у tmp_path."""
-    path = tmp_path / "test_bank.db"
+def api_db_path(migrated_template: Path, tmp_path: Path) -> Path:
+    path = tmp_path / "test_api.db"
     shutil.copy(migrated_template, path)
-    return f"sqlite:///{path}"
+    return path
 
 
 @pytest.fixture
-def settings(db_url: str) -> Settings:
-    return Settings(database_url=db_url, app_env="test", _env_file=None)
+def api_db_url(api_db_path: Path) -> str:
+    return f"sqlite:///{api_db_path}"
 
 
 @pytest_asyncio.fixture
-async def asgi_app(settings: Settings) -> AsyncIterator[FastAPI]:
-    """Застосунок із тестовою БД; ASGITransport не запускає lifespan, тому - вручну."""
-    app = create_app(settings)
+async def asgi_app(api_db_url: str) -> AsyncIterator[FastAPI]:
+    app = create_app(api_db_url)
     async with app.router.lifespan_context(app):
         yield app
 
 
 @pytest_asyncio.fixture
 async def client(asgi_app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
-    """HTTP-клієнт до застосунку без мережі: запити йдуть прямо в ASGI-застосунок."""
     transport = httpx.ASGITransport(app=asgi_app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test"
+    ) as http:
         yield http
 
 
 @pytest_asyncio.fixture
-async def bank(client: httpx.AsyncClient) -> dict[str, int]:
-    """Дані створюються через сам API: рахунки UA-1001 (1000 UAH), UA-1002 (250 UAH),
-    UA-2001 (100 USD, savings); повертає id клієнтів і рахунків."""
-    ids = {}
-    for key, name in [("olena", "Олена Коваленко"), ("andrii", "Андрій Мельник")]:
-        ids[key] = (await client.post("/clients", json={"full_name": name})).json()["id"]
-    for owner, number, balance, currency, kind in [
-        ("olena", "UA-1001", "1000.00", "UAH", "current"),
-        ("andrii", "UA-1002", "250.00", "UAH", "current"),
-        ("olena", "UA-2001", "100.00", "USD", "savings"),
-    ]:
+async def campus(client: httpx.AsyncClient) -> dict[str, int]:
+    ids: dict[str, int] = {}
+    for name in ("PI-21", "PI-22", "PI-23"):
+        ids[name] = (await client.post("/groups", json={"name": name})).json()[
+            "group_id"
+        ]
+    rows = [
+        ("Олена", "Коваленко", "PI-21", 95.0, "olena@example.com"),
+        ("Андрій", "Мельник", "PI-21", 80.0, None),
+        ("Ірина", "Бондар", "PI-22", 99.5, None),
+        ("Тарас", "Гриценко", "PI-22", 55.0, None),
+    ]
+    for first, last, group, grade, email in rows:
         response = await client.post(
-            "/accounts",
+            "/students",
             json={
-                "client_id": ids[owner],
-                "number": number,
-                "opening_balance": balance,
-                "currency": currency,
-                "account_type": kind,
+                "first_name": first,
+                "last_name": last,
+                "group_id": ids[group],
+                "average_grade": grade,
+                "email": email,
             },
         )
-        ids[number] = response.json()["id"]
+        ids[last] = response.json()["id"]
     return ids
 
 
 @pytest_asyncio.fixture
-async def api(asgi_app: FastAPI) -> AsyncIterator[BankApiClient]:
-    """Клієнт external_api, що звертається до застосунку без мережі (ASGITransport)."""
+async def api(asgi_app: FastAPI) -> AsyncIterator[StudentApiClient]:
     transport = httpx.ASGITransport(app=asgi_app)
-    async with BankApiClient("http://test", transport=transport, max_concurrency=3) as client:
+    async with StudentApiClient(
+        "http://test", transport=transport, max_concurrency=3
+    ) as client:
         yield client
+
+
+@pytest.fixture
+def fast_retry() -> RetryPolicy:
+    return RetryPolicy(attempts=3, backoff=0.01)
 
 
 def free_port() -> int:
@@ -115,17 +218,19 @@ def free_port() -> int:
 
 
 @pytest.fixture
-def serve() -> Iterator[Callable[[FastAPI], str]]:
-    """Запускає застосунок у справжньому uvicorn (окремий потік) і повертає base URL."""
+def serve() -> Iterator[Serve]:
     servers: list[tuple[uvicorn.Server, threading.Thread]] = []
 
     def start(app: FastAPI) -> str:
         port = free_port()
-        server = uvicorn.Server(
-            uvicorn.Config(
-                app, host="127.0.0.1", port=port, log_level="warning", timeout_graceful_shutdown=1
-            )
+        config = uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            timeout_graceful_shutdown=1,
         )
+        server = uvicorn.Server(config)
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
         servers.append((server, thread))

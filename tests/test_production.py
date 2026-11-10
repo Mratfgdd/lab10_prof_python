@@ -1,149 +1,160 @@
-"""Production-частина: конфігурація з environment, secrets, /health, X-API-Key, CLI, прогноз."""
+"""Готовність до production: файли розгортання, секрети, метадані пакета."""
 
-from decimal import Decimal
-from pathlib import Path
+import tomllib
 
-import httpx
 import pytest
-from fastapi import FastAPI
-from pydantic import ValidationError
-from sqlalchemy import create_engine
+from support import PROJECT_ROOT
 
-from bank_account_service import __version__
-from bank_account_service.api import create_app
-from bank_account_service.config import Settings
-from bank_account_service.interest import accrue_python, forecast
-from bank_account_service.main import main
+from student_manager import __version__
+from student_manager.api import app
+from student_manager.config import Settings
+from student_manager.main import main
 
-pytestmark = pytest.mark.asyncio
+SETTINGS_ENV = {"APP_NAME", "ENVIRONMENT", "DATABASE_URL", "LOG_LEVEL"}
 
 
-async def test_defaults_without_environment() -> None:
-    settings = Settings()
-    assert (settings.app_env, settings.database_url, settings.log_level) == (
-        "development",
-        "sqlite:///bank.db",
-        "INFO",
-    )
-    assert settings.api_token is None
+def read(name: str) -> str:
+    return (PROJECT_ROOT / name).read_text(encoding="utf-8")
 
 
-async def test_empty_api_token_means_not_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("API_TOKEN", "")
-    assert Settings().api_token is None
-
-
-async def test_environment_variables_override_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.setenv("LOG_LEVEL", "debug")
-    url = "postgresql://bank:s3cret@db:5432/bank"  # pragma: allowlist secret
-    monkeypatch.setenv("DATABASE_URL", url)
-    monkeypatch.setenv("API_TOKEN", "token-from-env")
-    settings = Settings()
-    assert (settings.app_env, settings.log_level) == ("production", "DEBUG")
-    assert settings.api_token is not None
-    assert settings.api_token.get_secret_value() == "token-from-env"
-    assert "token-from-env" not in repr(settings)
-    assert settings.safe_database_url == "postgresql://bank:***@db:5432/bank"
-
-
-async def test_dotenv_file_is_read_and_environment_wins(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    (tmp_path / ".env").write_text("APP_ENV=production\nLOG_LEVEL=WARNING\n", encoding="utf-8")
-    monkeypatch.setenv("LOG_LEVEL", "ERROR")
-    settings = Settings()
-    assert (settings.app_env, settings.log_level) == ("production", "ERROR")
-
-
-@pytest.mark.parametrize(
-    ("name", "value"), [("APP_ENV", "staging"), ("LOG_LEVEL", "LOUD"), ("CONFLICT_RETRIES", "-1")]
-)
-async def test_invalid_configuration_fails_fast(
-    monkeypatch: pytest.MonkeyPatch, name: str, value: str
-) -> None:
-    monkeypatch.setenv(name, value)
-    with pytest.raises(ValidationError):
-        Settings()
-
-
-async def test_health_reports_version_environment_and_database(
-    client: httpx.AsyncClient,
-) -> None:
-    response = await client.get("/health")
-    assert response.status_code == 200
-    assert response.json() == {
-        "status": "ok",
-        "version": __version__,
-        "environment": "test",
-        "database": "ok",
+def env_names(text: str) -> set[str]:
+    return {
+        line.split("=", 1)[0]
+        for line in text.splitlines()
+        if "=" in line and not line.startswith("#")
     }
 
 
-async def test_health_is_503_when_database_is_unavailable(
-    asgi_app: FastAPI, tmp_path: Path
-) -> None:
-    asgi_app.state.engine.dispose()
-    asgi_app.state.engine = create_engine(f"sqlite:///{tmp_path / 'missing' / 'bank.db'}")
-    transport = httpx.ASGITransport(app=asgi_app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-        response = await http.get("/health")
-    assert (response.status_code, response.json()["database"]) == (503, "error")
+def test_env_example_lists_every_setting() -> None:
+    names = env_names(read(".env.example"))
+    assert SETTINGS_ENV <= names
+    schema = Settings.model_json_schema()["properties"]
+    fields = {name.upper() for name in schema}
+    assert names <= fields | {"APP_ENV"}
 
 
-async def test_api_token_protects_changes_but_not_reads(settings: Settings) -> None:
-    app = create_app(
-        Settings(
-            database_url=settings.database_url,
-            app_env="test",
-            api_token="s3cr3t-token",  # pragma: allowlist secret
-            _env_file=None,
-        )
+def test_env_example_has_no_secret_values() -> None:
+    values = dict(
+        line.split("=", 1)
+        for line in read(".env.example").splitlines()
+        if "=" in line
     )
-    async with app.router.lifespan_context(app):
-        transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-            body = {"full_name": "Олена Коваленко"}
-            no_key = await http.post("/clients", json=body)
-            wrong = await http.post("/clients", json=body, headers={"X-API-Key": "guess"})
-            ok = await http.post("/clients", json=body, headers={"X-API-Key": "s3cr3t-token"})
-            read = await http.get("/clients/1")
-    assert (no_key.status_code, wrong.status_code, ok.status_code) == (401, 401, 201)
-    assert no_key.headers["WWW-Authenticate"] == "ApiKey"
-    assert read.status_code == 200
+    assert values["API_TOKEN"] == ""
+    assert not (PROJECT_ROOT / ".env").exists()
 
 
-async def test_numpy_forecast_matches_python_baseline() -> None:
-    balances = [0, 1825, 100_000, 1_525_075, 50_000_000]
-    now, later = forecast(balances, 365)
-    assert now == sum(balances)
-    assert later == sum(accrue_python(balance, 365) for balance in balances)
+@pytest.mark.parametrize("name", [".gitignore", ".dockerignore"])
+def test_dotenv_is_ignored_by_git_and_docker(name: str) -> None:
+    lines = read(name).splitlines()
+    assert ".env" in lines
+    assert "*.db" in lines
 
 
-async def test_interest_endpoint(client: httpx.AsyncClient, bank: dict[str, int]) -> None:
-    response = await client.get("/statistics/interest", params={"currency": "UAH"})
-    data = response.json()
-    assert (data["accounts"], data["total_now"]) == (2, "1250.00")
-    expected = Decimal(accrue_python(100_000, 365) + accrue_python(25_000, 365)).scaleb(-2)
-    assert Decimal(data["total_after"]) == expected
-    assert Decimal(data["interest"]) == expected - Decimal("1250.00")
+def test_version_is_single_sourced() -> None:
+    metadata = tomllib.loads(read("pyproject.toml"))
+    assert metadata["project"]["version"] == __version__
+    assert metadata["project"]["name"] == "student-manager"
+    assert metadata["project"]["scripts"]["student-manager"] == (
+        "student_manager.main:main"
+    )
 
 
-async def test_cli_migrate_and_config_hide_secrets(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    database = tmp_path / "data" / "bank.db"
-    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{database}")
-    monkeypatch.setenv("API_TOKEN", "super-secret-value")
-    from bank_account_service.config import get_settings
+def test_package_metadata_is_complete() -> None:
+    project = tomllib.loads(read("pyproject.toml"))["project"]
+    for key in ("description", "readme", "license", "authors", "classifiers"):
+        assert project[key]
+    assert (
+        (PROJECT_ROOT / "LICENSE")
+        .read_text(encoding="utf-8")
+        .startswith("MIT License")
+    )
+    assert project["requires-python"] == ">=3.11"
 
-    get_settings.cache_clear()
-    try:
-        assert main(["migrate"]) == 0
-        assert main(["config"]) == 0
-    finally:
-        get_settings.cache_clear()
-    assert database.exists()
-    output = capsys.readouterr().out
-    assert "super-secret-value" not in output
-    assert "API_TOKEN         **********" in output
+
+def test_package_data_covers_static_files_and_migrations() -> None:
+    package_data = tomllib.loads(read("pyproject.toml"))["tool"]["setuptools"][
+        "package-data"
+    ]
+    assert "static/*" in package_data["student_manager"]
+    assert package_data["student_manager.migrations"] == ["script.py.mako"]
+    base = PROJECT_ROOT / "src" / "student_manager"
+    assert (base / "py.typed").exists()
+    assert (base / "migrations" / "script.py.mako").exists()
+    assert (base / "migrations" / "versions" / "__init__.py").exists()
+
+
+def test_dockerfile_is_production_ready() -> None:
+    text = read("Dockerfile")
+    assert text.count("FROM ") == 2
+    assert "AS builder" in text
+    assert "USER appuser" in text
+    assert "HEALTHCHECK" in text
+    assert 'VOLUME ["/app/data"]' in text
+    assert "/health" in text
+    assert "EXPOSE 8000" in text
+    assert '"student-manager", "serve"' in text
+
+
+def test_dockerfile_has_no_credentials() -> None:
+    text = read("Dockerfile").lower()
+    for word in ("password", "token", "secret", "api_key"):
+        assert word not in text
+
+
+def test_dockerfile_entry_point_exists() -> None:
+    assert callable(main)
+    assert app.title
+
+
+def test_ci_workflow_runs_every_required_check() -> None:
+    text = read(".github/workflows/ci.yml")
+    for command in (
+        "ruff check .",
+        "ruff format --check .",
+        "mypy",
+        "pytest",
+        "python -m build",
+        "docker build",
+        "docker run",
+        "tools/check_secrets.py",
+    ):
+        assert command in text
+    assert '["3.11", "3.12"]' in text
+
+
+def test_ci_does_not_contain_a_real_token() -> None:
+    text = read(".github/workflows/ci.yml")
+    assert "openssl rand" in text
+    assert "ghp_" not in text
+
+
+def test_readme_documents_the_required_sections() -> None:
+    text = read("README.md")
+    for heading in (
+        "## Встановлення",
+        "## Конфігурація",
+        "## Запуск",
+        "## Docker",
+        "## API",
+        "## Тести",
+        "## CI/CD",
+        "## Демонстрація",
+    ):
+        assert heading in text
+    for endpoint in (
+        "/health",
+        "/students",
+        "/groups/{group_id}/students",
+        "/groups/{group_id}/statistics",
+    ):
+        assert endpoint in text
+
+
+def test_no_absolute_user_paths_in_the_project() -> None:
+    markers = ("C:\\Users", "C:/Users", "/home/", "/Users/")
+    for path in (PROJECT_ROOT / "src").rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        assert not any(marker in text for marker in markers), path
+    for name in ("Dockerfile", "README.md", "pyproject.toml"):
+        text = read(name)
+        assert not any(marker in text for marker in markers[:2]), name
