@@ -1,135 +1,183 @@
-# Bank Account Service
+# Student Manager
 
-## Description
+REST API системи обліку студентів (варіант 1) у production-oriented вигляді:
+пакет `student-manager`, конфігурація через environment variables, Docker,
+CI/CD (GitHub Actions) і документація. Продовження проєкту Lab_01: студент має
+ім'я, прізвище, групу й середній бал; поверх шару збереження (SQLAlchemy +
+Alembic, Lab_07) працює REST API (FastAPI, Lab_08), а повторна статистика груп
+кешується (оптимізація за результатами Lab_09).
 
-REST API системи банківських рахунків: клієнти, рахунки, поповнення, списання, атомарні
-перекази й історія операцій. Варіант 4 курсу «Професійний Python» (ЛР1–ЛР10):
-production-версія проєкту - пакет, конфігурація через environment, Docker і CI/CD.
+## Можливості
 
-## Features
+- додавання, перегляд, зміна й видалення студентів;
+- пошук за прізвищем, фільтри за групою й балом, сортування, сторінки;
+- найкращий студент, середній бал і статистика групи;
+- перенесення студентів між групами однією транзакцією;
+- `GET /health` для Docker і оркестраторів;
+- необов'язковий захист записів заголовком `X-API-Key`;
+- SQLite, міграції Alembic, кеш статистики груп з інвалідацією;
+- wheel і sdist, Docker image, CI.
 
-- Клієнти та рахунки (UA-NNNN), поповнення і списання; від'ємний баланс заборонений.
-- Атомарний переказ (транзакція SQLAlchemy, optimistic locking, повтор при конфлікті).
-- Історія операцій, пошук і фільтри рахунків, загальна сума коштів за валютами.
-- Прогноз відсотків (10 % річних, щоденна капіталізація) на NumPy - оптимізація з ЛР9.
-- SQLite + SQLAlchemy 2 + Alembic; міграції застосовуються під час запуску сервісу.
-- FastAPI + Pydantic, Swagger UI (`/docs`) без CDN, `GET /health` для Docker HEALTHCHECK.
-- Асинхронний клієнт `bank-api-client` (httpx: Task, gather, TaskGroup, Semaphore, timeout, retry).
+## Структура
 
-## Requirements
-
-Python 3.11+ або Docker.
-
-## Installation
-
-```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"            # для розробки
-pip install dist/bank_account_service-1.0.0-py3-none-any.whl   # або встановити wheel
+```
+src/student_manager/
+    api.py            REST API: endpoints, помилки, create_app(), /health
+    config.py         Settings (pydantic-settings): environment variables
+    database.py       engine, сесії, міграції
+    models.py         ORM-моделі Group і Student
+    repositories.py   шар репозиторіїв
+    services.py       бізнес-логіка й транзакції
+    caching.py        кеш статистики груп
+    main.py           команди student-manager (serve, migrate, config, ...)
+    migrations/       міграції Alembic (входять у wheel)
+tests/                unit, integration і production-тести
+tools/                check_secrets.py, smoke_test.py, call_api.py
+Dockerfile  .dockerignore  .env.example  alembic.ini
+.github/workflows/ci.yml
 ```
 
-## Configuration
+## Встановлення
 
-Усі параметри - environment variables (або файл `.env` для локальної розробки):
+```
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install -e ".[dev]"
+```
 
-```bash
+Лише для запуску (без інструментів розробки): `pip install .`
+
+## Конфігурація
+
+Усі параметри задаються змінними середовища; для локальної роботи їх можна
+покласти у файл `.env` (його немає в Git і в Docker image):
+
+```
 cp .env.example .env
 ```
 
-| Змінна | Типово | Опис |
-|---|---|---|
-| `APP_ENV` | `development` | `development`, `test` або `production` |
-| `DATABASE_URL` | `sqlite:///bank.db` | URL бази SQLAlchemy |
-| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `CONFLICT_RETRIES` | `3` | повтори операції при конфлікті версій (0–10) |
-| `API_TOKEN` | не задано | **секрет**: якщо задано, POST/PATCH/DELETE вимагають `X-API-Key` |
+| Змінна | Призначення | Типово |
+| --- | --- | --- |
+| `ENVIRONMENT` (або `APP_ENV`) | `development`, `test`, `production` | `development` |
+| `DATABASE_URL` | URL бази даних | `sqlite:///students.db` |
+| `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` | `INFO` |
+| `APP_NAME` | назва в OpenAPI | `Student Manager API` |
+| `BATCH_CONCURRENCY`, `BATCH_TIMEOUT` | пакетна статистика груп | `5`, `10` |
+| `API_TOKEN` | секрет: якщо задано, зміни даних потребують `X-API-Key` | не задано |
 
-Секрети не зберігаються в коді, README, Dockerfile чи Git. `.env` є в `.gitignore` і
-`.dockerignore`, значення передаються через середовище, `docker run --env-file` або
-GitHub Actions secrets. `bank-account-service config` показує конфігурацію з прихованими
-секретами, `python tools/check_secrets.py` перевіряє проєкт на секрети (крок CI).
+Реальні значення секретів не зберігаються в коді, README, Dockerfile чи Git:
+`API_TOKEN` і пароль у `DATABASE_URL` надходять лише зі змінних середовища,
+локального `.env` або secrets платформи (GitHub Actions secrets,
+`docker run --env-file`). Поточну конфігурацію без значень секретів показує
+`student-manager config`.
 
-## Running locally
+Приклад зміни без правки коду:
 
-```bash
-bank-account-service serve          # міграції + uvicorn на http://127.0.0.1:8000
-bank-account-service migrate        # лише міграції (alembic upgrade head)
-bank-account-service config         # ефективна конфігурація
+```
+export LOG_LEVEL=DEBUG
+$env:LOG_LEVEL = "DEBUG"
 ```
 
-## Running with Docker
+## Запуск
 
-```bash
-docker build -t bank-account-service:1.0.0 .
-docker run -d --name bank -p 8000:8000 \
-    -v bank_data:/app/data \
-    -e APP_ENV=production -e LOG_LEVEL=INFO \
-    --env-file .env \
-    bank-account-service:1.0.0
-curl http://localhost:8000/health
+```
+student-manager migrate
+student-manager serve
 ```
 
-Образ двоетапний (wheel збирається в окремому етапі), працює від користувача `appuser`,
-має `HEALTHCHECK`; SQLite-файл зберігається у volume `/app/data`.
+`serve` спершу застосовує міграції (`--no-migrate` вимикає), потім запускає
+uvicorn. Документація: <http://127.0.0.1:8000/docs>, схема: `/openapi.json`.
+
+Консольні команди роботи з БД: `seed`, `groups`, `students`, `find`, `add`,
+`grade`, `transfer`, `best`, `average`, `delete` (`student-manager --help`).
+
+## Docker
+
+```
+docker build -t student-manager:1.0 .
+docker run --rm -p 8000:8000 -e ENVIRONMENT=production -e LOG_LEVEL=INFO \
+    -v student_data:/app/data student-manager:1.0
+```
+
+Образ багатоетапний: wheel збирається в окремому етапі, фінальний образ містить
+лише Python і встановлений пакет, процес працює від користувача `appuser`.
+База SQLite лежить у `/app/data` (volume), тому дані переживають перезапуск.
+`HEALTHCHECK` опитує `/health`. Секрет передається без значення в команді:
+
+```
+docker run -d -p 8000:8000 -e API_TOKEN -v student_data:/app/data student-manager:1.0
+```
 
 ## API
 
-Документація: `/docs` (Swagger UI), `/openapi.json` (схема OpenAPI).
+| Метод і шлях | Призначення |
+| --- | --- |
+| `GET /health` | стан сервісу, версія, середовище, база даних |
+| `GET /students` | список: `last_name`, `group_id`, `min_grade`, `max_grade`, `sort`, `order`, `limit`, `offset` |
+| `GET /students/best` | найкращий студент |
+| `GET /students/{student_id}` | студент за id |
+| `POST /students` | додати студента |
+| `PATCH /students/{student_id}` | змінити бал, групу, ім'я, email |
+| `DELETE /students/{student_id}` | видалити студента |
+| `GET /groups` | групи зі статистикою |
+| `POST /groups` | створити групу |
+| `GET /groups/{group_id}/students` | студенти групи |
+| `GET /groups/{group_id}/statistics` | кількість, середній, найкращий і найгірший бал |
+| `POST /groups/{group_id}/transfer` | перенести студентів до групи |
+| `POST /statistics/groups` | статистика кількох груп паралельно |
 
-| Метод | URL | Опис |
-|---|---|---|
-| GET | `/health` | стан сервісу і БД |
-| POST | `/clients` | створити клієнта |
-| GET | `/clients/{id}` | клієнт |
-| POST | `/accounts` | відкрити рахунок |
-| GET | `/accounts` | пошук і фільтри (number, client_id, currency, account_type, min_balance, sort, order, limit, offset) |
-| GET / PATCH / DELETE | `/accounts/{id}` | рахунок і баланс / змінити тип / закрити |
-| GET | `/accounts/{id}/transactions` | історія операцій |
-| POST | `/accounts/{id}/deposit`, `/accounts/{id}/withdraw` | поповнення, списання |
-| POST | `/transfers` | атомарний переказ |
-| GET | `/statistics/funds`, `/statistics/interest` | загальна сума коштів, прогноз відсотків |
+Помилки мають вигляд `{"error": "...", "detail": "..."}` (401, 404, 409, 422).
+`POST`, `PATCH` і `DELETE` потребують заголовок `X-API-Key`, якщо задано
+`API_TOKEN`; читання й `/health` відкриті.
 
-```bash
-curl -X POST localhost:8000/clients -H "Content-Type: application/json" \
-     -H "X-API-Key: $API_TOKEN" -d '{"full_name": "Олена Коваленко"}'
-```
-
-## Testing
-
-```bash
-pytest -v --cov            # 52 тести, поріг покриття 85 %
-ruff check . && ruff format --check . && mypy
-python -m build            # dist/*.whl і dist/*.tar.gz
-```
-
-## Project structure
+## Тести
 
 ```
-src/bank_account_service/   api, config, database, models, repositories, services,
-                            schemas, interest, external_api, main; migrations/; static/
-tests/                      API, клієнт, конфігурація, health, secrets, CLI
-tools/                      check_secrets.py, call_api.py
-.github/workflows/ci.yml    CI: secret scan, ruff, mypy, pytest, build, docker
-Dockerfile, .dockerignore, .env.example, pyproject.toml, alembic.ini, LICENSE
+pytest -v --cov --cov-report=term-missing
+ruff check .
+ruff format --check .
+mypy
+python tools/check_secrets.py
 ```
+
+Поріг покриття – 90 % (`pyproject.toml`).
+
+## Пакет
+
+```
+python -m build
+twine check dist/*
+python tools/smoke_test.py --wheel dist/student_manager-1.0.0-py3-none-any.whl
+```
+
+Створюються `dist/student_manager-1.0.0-py3-none-any.whl` і
+`dist/student_manager-1.0.0.tar.gz`. `smoke_test.py` встановлює wheel у чисте
+virtual environment, виконує міграції, запускає сервер і перевіряє API.
 
 ## CI/CD
 
-`.github/workflows/ci.yml` на кожен push у `main` і pull request: job `quality`
-(Python 3.11 і 3.12) - secret scan, ruff check, ruff format --check, mypy, pytest з
-покриттям, build wheel/sdist, встановлення wheel у чисте venv, artifact `dist`; job `docker`
-- збірка образу та smoke test `/health` у запущеному контейнері.
+`.github/workflows/ci.yml` виконується на кожен push у `main` і pull request:
 
-## Demo scenario
+1. **quality** (Python 3.11 і 3.12): сканування секретів, `ruff check`,
+   `ruff format --check`, `mypy`, `pytest` із покриттям, `python -m build`,
+   `twine check`, встановлення wheel у чисте середовище, артефакт `dist`;
+2. **docker**: `docker build`, запуск контейнера з volume, очікування
+   Docker healthcheck, перевірка non-root користувача, smoke-тест API,
+   перезапуск на тому ж volume й перевірка збереження даних.
 
-1. `pytest -v`, `ruff check .`, `mypy` - якість коду.
-2. `python -m build` - `dist/` з wheel і sdist.
-3. `docker build -t bank-account-service:1.0.0 .`, `docker images`.
-4. `docker run ...` (див. вище), `docker ps` - контейнер `healthy`.
-5. `curl localhost:8000/health`, `/docs`; створити клієнта, рахунки, переказ, історію.
-6. Показати `.env.example`, `bank-account-service config` і CI workflow.
+Одноразовий токен для CI створюється `openssl rand` у самому workflow.
 
-## Authors
+## Демонстрація
 
-Nazar Levandivskyi
+1. `pytest -v`, `ruff check .`, `mypy` – якість коду.
+2. `python -m build` – wheel і sdist у `dist/`.
+3. `docker build -t student-manager:1.0 .` і `docker run ...` (див. вище).
+4. `GET /health` → `{"status": "ok", "environment": "production", ...}`.
+5. `/docs`: створити групу `PI-21` (`POST /groups`), студента (`POST /students`),
+   отримати `GET /groups/1/statistics`; перенести студента `POST /groups/2/transfer`.
+6. Перезапустити контейнер на тому ж volume – дані на місці.
+7. Показати зелений pipeline у GitHub Actions, `.env.example` і `.gitignore`.
+
+## Ліцензія
+
+MIT, див. `LICENSE`.
