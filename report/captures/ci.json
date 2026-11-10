@@ -1,0 +1,220 @@
+{
+ "run_id": 42914782039,
+ "number": 2,
+ "url": "https://github.com/Mratfgdd/lab10_prof_python/actions/runs/42914782039",
+ "sha": "e1dd1ce04cceb63dae35966808f176039f5cef39",
+ "title": "Remove the previous bank service report",
+ "conclusion": "success",
+ "event": "push",
+ "jobs": [
+  {
+   "id": 130174297022,
+   "name": "Lint, types, tests, build (Python 3.12)",
+   "conclusion": "success",
+   "seconds": 60,
+   "steps": [
+    {
+     "name": "Checkout",
+     "conclusion": "success",
+     "seconds": 1
+    },
+    {
+     "name": "Set up Python",
+     "conclusion": "success",
+     "seconds": 1
+    },
+    {
+     "name": "Install",
+     "conclusion": "success",
+     "seconds": 13
+    },
+    {
+     "name": "Secret scan",
+     "conclusion": "success",
+     "seconds": 0
+    },
+    {
+     "name": "Ruff lint",
+     "conclusion": "success",
+     "seconds": 0
+    },
+    {
+     "name": "Ruff format check",
+     "conclusion": "success",
+     "seconds": 0
+    },
+    {
+     "name": "Type check (mypy --strict)",
+     "conclusion": "success",
+     "seconds": 5
+    },
+    {
+     "name": "Tests with coverage",
+     "conclusion": "success",
+     "seconds": 24
+    },
+    {
+     "name": "Build wheel and sdist",
+     "conclusion": "success",
+     "seconds": 3
+    },
+    {
+     "name": "Check distributions",
+     "conclusion": "success",
+     "seconds": 0
+    },
+    {
+     "name": "Install the wheel in a clean virtual environment and run it",
+     "conclusion": "success",
+     "seconds": 7
+    },
+    {
+     "name": "Upload package artifact",
+     "conclusion": "success",
+     "seconds": 2
+    }
+   ]
+  },
+  {
+   "id": 130174297485,
+   "name": "Lint, types, tests, build (Python 3.11)",
+   "conclusion": "success",
+   "seconds": 76,
+   "steps": [
+    {
+     "name": "Checkout",
+     "conclusion": "success",
+     "seconds": 1
+    },
+    {
+     "name": "Set up Python",
+     "conclusion": "success",
+     "seconds": 1
+    },
+    {
+     "name": "Install",
+     "conclusion": "success",
+     "seconds": 16
+    },
+    {
+     "name": "Secret scan",
+     "conclusion": "success",
+     "seconds": 0
+    },
+    {
+     "name": "Ruff lint",
+     "conclusion": "success",
+     "seconds": 0
+    },
+    {
+     "name": "Ruff format check",
+     "conclusion": "success",
+     "seconds": 0
+    },
+    {
+     "name": "Type check (mypy --strict)",
+     "conclusion": "success",
+     "seconds": 9
+    },
+    {
+     "name": "Tests with coverage",
+     "conclusion": "success",
+     "seconds": 27
+    },
+    {
+     "name": "Build wheel and sdist",
+     "conclusion": "success",
+     "seconds": 3
+    },
+    {
+     "name": "Check distributions",
+     "conclusion": "success",
+     "seconds": 0
+    },
+    {
+     "name": "Install the wheel in a clean virtual environment and run it",
+     "conclusion": "success",
+     "seconds": 12
+    },
+    {
+     "name": "Upload package artifact",
+     "conclusion": "skipped",
+     "seconds": 0
+    }
+   ]
+  },
+  {
+   "id": 130174984182,
+   "name": "Docker build, run, health check, persistence",
+   "conclusion": "success",
+   "seconds": 31,
+   "steps": [
+    {
+     "name": "Checkout",
+     "conclusion": "success",
+     "seconds": 1
+    },
+    {
+     "name": "Generate a throwaway API token",
+     "conclusion": "success",
+     "seconds": 0
+    },
+    {
+     "name": "Build image",
+     "conclusion": "success",
+     "seconds": 19
+    },
+    {
+     "name": "Show image",
+     "conclusion": "success",
+     "seconds": 0
+    },
+    {
+     "name": "Run container with a volume",
+     "conclusion": "success",
+     "seconds": 0
+    },
+    {
+     "name": "Wait for the Docker healthcheck",
+     "conclusion": "success",
+     "seconds": 6
+    },
+    {
+     "name": "Container runs as a non-root user",
+     "conclusion": "success",
+     "seconds": 0
+    },
+    {
+     "name": "Smoke test the API",
+     "conclusion": "success",
+     "seconds": 1
+    },
+    {
+     "name": "Restart the container on the same volume",
+     "conclusion": "success",
+     "seconds": 0
+    },
+    {
+     "name": "Data survived the restart",
+     "conclusion": "success",
+     "seconds": 1
+    },
+    {
+     "name": "Job summary",
+     "conclusion": "success",
+     "seconds": 0
+    },
+    {
+     "name": "Container logs",
+     "conclusion": "success",
+     "seconds": 0
+    },
+    {
+     "name": "Remove container and volume",
+     "conclusion": "success",
+     "seconds": 0
+    }
+   ]
+  }
+ ]
+}

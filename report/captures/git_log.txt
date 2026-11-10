@@ -1,0 +1,13 @@
+258a025 Create project structure
+f746e76 Implement production configuration
+f57075c Add tests
+c31c6f9 Add Docker support
+56bde30 Add CI pipeline
+b1421c0 Add lab report
+094d238 Rebuild the project as the student_manager REST API
+a01f01d Add production configuration and Python packaging
+809aa50 Add the test suite
+2b34e58 Add Docker support
+35e7ae4 Add CI pipeline and project tools
+474ec1a Add project documentation
+e1dd1ce Remove the previous bank service report

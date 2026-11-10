@@ -85,6 +85,10 @@ mypy_path = ["src", "tools", "report"]
 files = ["src", "tests", "tools"]
 plugins = ["pydantic.mypy"]
 
+[[tool.mypy.overrides]]
+module = "build_report"
+disallow_untyped_calls = false
+
 [tool.ruff]
 line-length = 79
 target-version = "py311"
