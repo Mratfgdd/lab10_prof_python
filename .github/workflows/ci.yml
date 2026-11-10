@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality:
     name: Lint, types, tests, build (Python ${{ matrix.python-version }})
@@ -25,6 +29,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
 
       - name: Install
         run: |
@@ -43,20 +49,19 @@ jobs:
       - name: Type check (mypy --strict)
         run: mypy
 
-      - name: Tests with coverage (fail under 85 %)
+      - name: Tests with coverage
         run: pytest -v --cov --cov-report=term-missing
 
       - name: Build wheel and sdist
         run: python -m build
 
-      - name: Check dist
-        run: ls -la dist
-
-      - name: Install wheel in clean venv
+      - name: Check distributions
         run: |
-          python -m venv /tmp/wheel-env
-          /tmp/wheel-env/bin/pip install dist/*.whl
-          /tmp/wheel-env/bin/bank-account-service --version
+          ls -la dist
+          twine check dist/*
+
+      - name: Install the wheel in a clean virtual environment and run it
+        run: python tools/smoke_test.py --wheel dist/student_manager-1.0.0-py3-none-any.whl
 
       - name: Upload package artifact
         if: matrix.python-version == '3.12'
@@ -66,31 +71,91 @@ jobs:
           path: dist/
 
   docker:
-    name: Docker build and smoke test
+    name: Docker build, run, health check, persistence
     needs: quality
     runs-on: ubuntu-latest
-    env:
-      API_TOKEN: ${{ secrets.API_TOKEN }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build image
-        run: docker build -t bank-account-service:ci -t "bank-account-service:${GITHUB_SHA::7}" .
+      - name: Generate a throwaway API token
+        run: echo "SMOKE_API_TOKEN=$(openssl rand -hex 16)" >> "$GITHUB_ENV"
 
-      - name: Run container and check /health
+      - name: Build image
+        run: docker build -t student-manager:ci -t "student-manager:${GITHUB_SHA::7}" .
+
+      - name: Show image
+        run: docker images student-manager
+
+      - name: Run container with a volume
+        env:
+          API_TOKEN: ${{ env.SMOKE_API_TOKEN }}
         run: |
-          docker run -d --name api -e APP_ENV=production -e API_TOKEN bank-account-service:ci
-          for attempt in $(seq 1 30); do
-            if docker exec api python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/health').read().decode())"; then
-              docker logs api
-              exit 0
-            fi
-            sleep 1
+          docker volume create student_data
+          docker run -d --name api -p 8000:8000 \
+            -v student_data:/app/data \
+            -e ENVIRONMENT=production -e LOG_LEVEL=INFO -e API_TOKEN \
+            student-manager:ci
+
+      - name: Wait for the Docker healthcheck
+        run: |
+          for attempt in $(seq 1 40); do
+            state=$(docker inspect --format '{{.State.Health.Status}}' api)
+            echo "healthcheck: $state"
+            if [ "$state" = "healthy" ]; then exit 0; fi
+            sleep 2
           done
           docker logs api
           exit 1
 
-      - name: Remove container
+      - name: Container runs as a non-root user
+        run: test "$(docker exec api id -u)" = "1000"
+
+      - name: Smoke test the API
+        run: python tools/smoke_test.py --url http://127.0.0.1:8000
+
+      - name: Restart the container on the same volume
+        env:
+          API_TOKEN: ${{ env.SMOKE_API_TOKEN }}
+        run: |
+          docker rm -f api
+          docker run -d --name api -p 8000:8000 \
+            -v student_data:/app/data \
+            -e ENVIRONMENT=production -e API_TOKEN \
+            student-manager:ci
+
+      - name: Data survived the restart
+        run: python tools/smoke_test.py --url http://127.0.0.1:8000 --persisted PI-31
+
+      - name: Job summary
         if: always()
-        run: docker rm -f api || true
+        run: |
+          {
+            echo "### docker images"
+            echo '```'
+            docker images student-manager
+            echo '```'
+            echo "### docker ps"
+            echo '```'
+            docker ps --filter name=api --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}'
+            echo '```'
+            echo "### GET /health"
+            echo '```'
+            curl -fsS http://127.0.0.1:8000/health
+            echo
+            echo '```'
+            echo "### docker inspect"
+            echo '```'
+            docker inspect --format 'user={{.Config.User}} health={{.State.Health.Status}}' api
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Container logs
+        if: always()
+        run: docker logs api
+
+      - name: Remove container and volume
+        if: always()
+        run: |
+          docker rm -f api || true
+          docker volume rm student_data || true
